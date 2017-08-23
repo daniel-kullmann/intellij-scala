@@ -12,31 +12,9 @@ import org.jetbrains.plugins.scala.lang.psi.api.statements.{ScFunction, ScTypeAl
 import org.jetbrains.plugins.scala.lang.psi.api.toplevel.imports.usages.ImportUsed
 import org.jetbrains.plugins.scala.lang.psi.api.toplevel.typedef.ScTypeDefinition
 import org.jetbrains.plugins.scala.lang.psi.types.{PhysicalSignature, ScSubstitutor, ScType, Signature}
-import org.jetbrains.plugins.scala.lang.resolve.processor.CompletionProcessor.QualifiedName
-import org.jetbrains.plugins.scala.lang.resolve.processor.precedence.PrecedenceHelper
+import org.jetbrains.plugins.scala.lang.resolve.processor.precedence._
 
 import scala.collection.{Set, mutable}
-
-object CompletionProcessor {
-
-  private def getSignature(element: PsiNamedElement, substitutor: => ScSubstitutor): Option[Signature] = element match {
-    case method: PsiMethod => Some(new PhysicalSignature(method, substitutor))
-    case _: ScTypeAlias |
-         _: PsiClass => None
-    case _ => Some(Signature(element, substitutor))
-  }
-
-  case class QualifiedName(name: String, isNamedParameter: Boolean)
-
-  object QualifiedName {
-
-    def apply(result: ScalaResolveResult): QualifiedName = {
-      val name = result.isRenamed.getOrElse(result.name)
-      QualifiedName(name, result.isNamedParameter)
-    }
-  }
-
-}
 
 class CompletionProcessor(override val kinds: Set[ResolveTargets.Value],
                           val getPlace: PsiElement,
@@ -44,29 +22,22 @@ class CompletionProcessor(override val kinds: Set[ResolveTargets.Value],
                           forName: Option[String] = None,
                           val includePrefixImports: Boolean = true,
                           val isIncomplete: Boolean = true)
-  extends BaseProcessor(kinds)(getPlace) with PrecedenceHelper[QualifiedName] {
+  extends BaseProcessor(kinds)(getPlace) with PrecedenceHelper[(String, Boolean)] {
 
-  private val precedence = new mutable.HashMap[QualifiedName, Int]()
+  override protected val topPrecedence: TopPrecedence[(String, Boolean)] = new TopPrecedenceImpl[(String, Boolean)] {
+
+    override implicit def toRepresentation(result: ScalaResolveResult): (String, Boolean) = {
+      import TopPrecedenceImpl.toStringRepresentation
+      (result, result.isNamedParameter)
+    }
+  }
 
   private val signatures = new mutable.HashMap[Signature, Boolean]()
 
   protected def postProcess(result: ScalaResolveResult): Unit = {
   }
 
-  protected def getQualifiedName(result: ScalaResolveResult): QualifiedName =
-    QualifiedName(result)
-
   override protected def isCheckForEqualPrecedence = false
-
-  protected def getTopPrecedence(result: ScalaResolveResult): Int =
-    precedence.getOrElse(QualifiedName(result), 0)
-
-  protected def setTopPrecedence(result: ScalaResolveResult, i: Int): Unit = {
-    precedence.put(QualifiedName(result), i)
-  }
-
-  override protected def filterNot(p: ScalaResolveResult, n: ScalaResolveResult): Boolean =
-    QualifiedName(p) == QualifiedName(n) && super.filterNot(p, n)
 
   import CompletionProcessor._
 
@@ -109,7 +80,8 @@ class CompletionProcessor(override val kinds: Set[ResolveTargets.Value],
                 val iterator = levelSet.iterator()
                 while (iterator.hasNext) {
                   val next = iterator.next()
-                  if (getQualifiedName(next) == getQualifiedName(result) && next.element != result.element &&
+                  if (topPrecedence.toRepresentation(next) == topPrecedence.toRepresentation(result) &&
+                    next.element != result.element &&
                     signature == getSignature(next.element, next.substitutor)) {
                     iterator.remove()
                   }
@@ -167,5 +139,15 @@ class CompletionProcessor(override val kinds: Set[ResolveTargets.Value],
       postProcess(next)
       accumulator.add(next)
     }
+  }
+}
+
+object CompletionProcessor {
+
+  private def getSignature(element: PsiNamedElement, substitutor: => ScSubstitutor): Option[Signature] = element match {
+    case method: PsiMethod => Some(new PhysicalSignature(method, substitutor))
+    case _: ScTypeAlias |
+         _: PsiClass => None
+    case _ => Some(Signature(element, substitutor))
   }
 }

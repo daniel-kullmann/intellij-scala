@@ -20,17 +20,19 @@ import scala.annotation.tailrec
   * Date: 01.12.11
   */
 //todo: logic is too complicated, too many connections between classes. Rewrite?
-trait PrecedenceHelper[T] {
+trait PrecedenceHelper[Repr] {
   this: BaseProcessor =>
 
   import PrecedenceHelper._
 
   def getPlace: PsiElement
 
+  protected val topPrecedence: TopPrecedence[Repr]
+
   protected lazy val placePackageName: String = ResolveUtils.getPlacePackage(getPlace)
   protected val levelSet: util.HashSet[ScalaResolveResult] = new util.HashSet
-  protected val qualifiedNamesSet: util.HashSet[T] = new util.HashSet[T]
-  protected val levelQualifiedNamesSet: util.HashSet[T] = new util.HashSet[T]
+  protected val qualifiedNamesSet: util.HashSet[Repr] = new util.HashSet[Repr]
+  protected val levelQualifiedNamesSet: util.HashSet[Repr] = new util.HashSet[Repr]
 
   protected def clear(): Unit = {
     candidatesSet.clear()
@@ -39,27 +41,11 @@ trait PrecedenceHelper[T] {
     levelSet.clear()
   }
 
-  protected def getQualifiedName(result: ScalaResolveResult): T
-
   private lazy val suspiciousPackages: Set[String] = collectPackages(getPlace)
 
   protected def ignored(results: Seq[ScalaResolveResult]): Boolean =
     results.headOption.flatMap(findQualifiedName)
       .exists((IgnoredPackages ++ suspiciousPackages).contains)
-
-  /**
-    * Returns highest precedence of all resolve results.
-    * 1 - import a._
-    * 2 - import a.x
-    * 3 - definition or declaration
-    */
-  protected def getTopPrecedence(result: ScalaResolveResult): Int
-
-  protected def setTopPrecedence(result: ScalaResolveResult, i: Int)
-
-  protected def filterNot(p: ScalaResolveResult, n: ScalaResolveResult): Boolean = {
-    getPrecedence(p) < getTopPrecedence(n)
-  }
 
   protected def isCheckForEqualPrecedence = true
 
@@ -77,7 +63,7 @@ trait PrecedenceHelper[T] {
   protected def addResults(results: Seq[ScalaResolveResult]): Boolean = {
     if (results.isEmpty) return true
     val result: ScalaResolveResult = results.head
-    lazy val qualifiedName: T = getQualifiedName(result)
+    lazy val qualifiedName = topPrecedence.toRepresentation(result)
     lazy val levelSet = getLevelSet(result)
 
     def addResults() {
@@ -88,11 +74,12 @@ trait PrecedenceHelper[T] {
       }
     }
 
-    val currentPrecedence = getPrecedence(result)
-    val topPrecedence = getTopPrecedence(result)
-    if (currentPrecedence < topPrecedence) return false
-    else if (currentPrecedence == topPrecedence && levelSet.isEmpty) return false
-    else if (currentPrecedence == topPrecedence) {
+    val current = precedence(result)
+    val top = topPrecedence(result)
+    if (current < top) return false
+    else if (current == top && levelSet.isEmpty) return false
+
+    else if (current == top) {
       if (isCheckForEqualPrecedence && qualifiedName != null &&
         (levelQualifiedNamesSet.contains(qualifiedName) ||
           qualifiedNamesSet.contains(qualifiedName))) {
@@ -104,11 +91,12 @@ trait PrecedenceHelper[T] {
         return false
       } else {
         if (!ignored(results)) {
-          setTopPrecedence(result, currentPrecedence)
+          topPrecedence(result) = current
           val levelSetIterator = levelSet.iterator()
           while (levelSetIterator.hasNext) {
             val next = levelSetIterator.next()
-            if (filterNot(next, result)) {
+            val nextPrecedence = precedence(next)
+            if (topPrecedence.filterNot(nextPrecedence, next, result)) {
               levelSetIterator.remove()
             }
           }
@@ -120,7 +108,7 @@ trait PrecedenceHelper[T] {
     true
   }
 
-  protected def getPrecedence(result: ScalaResolveResult): Int = {
+  private def precedence(result: ScalaResolveResult): Int = {
     specialPriority match {
       case Some(priority) => priority
       case None if result.prefixCompletion => PrecedenceTypes.PREFIX_COMPLETION

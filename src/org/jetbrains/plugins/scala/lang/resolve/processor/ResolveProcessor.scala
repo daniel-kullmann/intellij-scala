@@ -10,6 +10,7 @@ import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.util.PsiTreeUtil
 import org.jetbrains.plugins.scala.extensions._
 import org.jetbrains.plugins.scala.lang.psi.ScalaPsiUtil
+import org.jetbrains.plugins.scala.lang.psi.ScalaPsiUtil.hasStablePath
 import org.jetbrains.plugins.scala.lang.psi.api.expr.{ScSuperReference, ScThisReference}
 import org.jetbrains.plugins.scala.lang.psi.api.statements.params.ScTypeParam
 import org.jetbrains.plugins.scala.lang.psi.api.statements.{ScTypeAlias, ScTypeAliasDefinition}
@@ -17,7 +18,6 @@ import org.jetbrains.plugins.scala.lang.psi.api.toplevel.templates.ScTemplateBod
 import org.jetbrains.plugins.scala.lang.psi.api.toplevel.typedef.{ScClass, ScObject, ScTrait, ScTypeDefinition}
 import org.jetbrains.plugins.scala.lang.psi.impl.ScPackageImpl
 import org.jetbrains.plugins.scala.lang.psi.types.ScTypeExt
-import org.jetbrains.plugins.scala.lang.psi.types.result.Success
 import org.jetbrains.plugins.scala.lang.refactoring.util.ScalaNamesUtil
 import org.jetbrains.plugins.scala.lang.resolve.processor.precedence._
 import org.jetbrains.plugins.scala.util.ScEquivalenceUtil
@@ -30,6 +30,54 @@ class ResolveProcessor(override val kinds: Set[ResolveTargets.Value],
                        val name: String) extends BaseProcessor(kinds)(ref) with PrecedenceHelper[String] {
 
   import ResolveProcessor._
+
+  override protected val topPrecedence: TopPrecedence[String] = new TopPrecedence[String] {
+
+    private var precedence = 0
+
+    override def apply(result: ScalaResolveResult): Int = precedence
+
+    override def update(result: ScalaResolveResult, i: Int): Unit = {
+      precedence = i
+    }
+
+    override implicit def toRepresentation(result: ScalaResolveResult): String = {
+      def classCase(clazz: PsiClass) = {
+        val prefix = clazz match {
+          case _: ScObject => "Object"
+          case _ => "Class"
+        }
+        s"$prefix:${clazz.qualifiedName}"
+      }
+
+      def typeAliasCase(alias: ScTypeAlias): String = {
+        val maybeClass = if (alias.getParent.isInstanceOf[ScTemplateBody]) Option(alias.containingClass)
+        else None
+
+        maybeClass.map(_.qualifiedName)
+          .map(className => s"TypeAlias:$className#${alias.name}")
+          .orNull
+      }
+
+      result.getActualElement match {
+        case _: ScTypeParam => null
+        case clazz: PsiClass => classCase(clazz)
+        case t: ScTypeAliasDefinition if t.typeParameters.isEmpty =>
+          val maybeType = t.aliasedType.toOption
+          val maybeClass = maybeType.flatMap(_.extractClass).collect {
+            case definition: ScTypeDefinition if !definition.isInstanceOf[ScObject] &&
+              definition.typeParameters.isEmpty && hasStablePath(definition) => definition
+            case clazz: PsiClass if clazz.getTypeParameters.isEmpty => clazz
+          }
+
+          maybeClass.map(classCase)
+            .getOrElse(typeAliasCase(t))
+        case t: ScTypeAlias => typeAliasCase(t)
+        case p: PsiPackage => "Package:" + p.getQualifiedName
+        case _ => null
+      }
+    }
+  }
 
   @volatile
   private var resolveScope: GlobalSearchScope = null
@@ -55,58 +103,23 @@ class ResolveProcessor(override val kinds: Set[ResolveTargets.Value],
 
   def emptyResultSet: Boolean = candidatesSet.isEmpty || levelSet.isEmpty
 
-  protected var precedence: Int = 0
-
   /**
     * This method useful for resetting precednce if we dropped
     * all found candidates to seek implicit conversion candidates.
     */
   def resetPrecedence() {
-    precedence = 0
+    topPrecedence(null) = 0
   }
 
   import PrecedenceTypes._
 
-  def checkImports(): Boolean = precedence <= IMPORT
+  def checkImports(): Boolean = checkPrecedence(IMPORT)
 
-  def checkWildcardImports(): Boolean = precedence <= WILDCARD_IMPORT
+  def checkWildcardImports(): Boolean = checkPrecedence(WILDCARD_IMPORT)
 
-  def checkPredefinedClassesAndPackages(): Boolean = precedence <= SCALA_PREDEF
+  def checkPredefinedClassesAndPackages(): Boolean = checkPrecedence(SCALA_PREDEF)
 
-  override protected def getQualifiedName(result: ScalaResolveResult): String = {
-    def defaultForTypeAlias(t: ScTypeAlias): String = {
-      if (t.getParent.isInstanceOf[ScTemplateBody] && t.containingClass != null) {
-        "TypeAlias:" + t.containingClass.qualifiedName + "#" + t.name
-      } else null
-    }
-
-    result.getActualElement match {
-      case _: ScTypeParam => null
-      case c: ScObject => "Object:" + c.qualifiedName
-      case c: PsiClass => "Class:" + c.qualifiedName
-      case t: ScTypeAliasDefinition if t.typeParameters.isEmpty =>
-        t.aliasedType match {
-          case Success(tp, _) =>
-            tp.extractClass match {
-              case Some(_: ScObject) => defaultForTypeAlias(t)
-              case Some(td: ScTypeDefinition) if td.typeParameters.isEmpty && ScalaPsiUtil.hasStablePath(td) =>
-                "Class:" + td.qualifiedName
-              case Some(c: PsiClass) if c.getTypeParameters.isEmpty => "Class:" + c.qualifiedName
-              case _ => defaultForTypeAlias(t)
-            }
-          case _ => defaultForTypeAlias(t)
-        }
-      case t: ScTypeAlias => defaultForTypeAlias(t)
-      case p: PsiPackage => "Package:" + p.getQualifiedName
-      case _ => null
-    }
-  }
-
-  protected def getTopPrecedence(result: ScalaResolveResult): Int = precedence
-
-  protected def setTopPrecedence(result: ScalaResolveResult, i: Int) {
-    precedence = i
-  }
+  private def checkPrecedence(i: Int) = topPrecedence(null) <= i
 
   override def changedLevel: Boolean = {
     if (!fromHistory && !history.lastOption.contains(ChangedLevel)) {
@@ -125,7 +138,7 @@ class ResolveProcessor(override val kinds: Set[ResolveTargets.Value],
     }
 
     if (levelSet.isEmpty) true
-    else if (precedence == OTHER_MEMBERS) update
+    else if (topPrecedence(null) == OTHER_MEMBERS) update
     else !update
   }
 
